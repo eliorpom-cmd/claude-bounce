@@ -1,0 +1,4 @@
+build/
+.testwindow/
+.DS_Store
+*.bak.*

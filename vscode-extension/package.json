@@ -1,0 +1,67 @@
+{
+  "name": "claude-bounce-bridge",
+  "displayName": "Claude Bounce Bridge",
+  "description": "Bounces the real VS Code Dock icon when Claude Code finishes a turn.",
+  "version": "1.0.0",
+  "publisher": "byelior",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/eliorpom-cmd/claude-bounce.git"
+  },
+  "engines": { "vscode": "^1.94.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Running a task requires a trusted workspace."
+    }
+  },
+  "contributes": {
+    "taskDefinitions": [
+      {
+        "type": "claudeBounce",
+        "required": ["task"],
+        "properties": {
+          "task": { "type": "string", "description": "Internal task name." }
+        }
+      }
+    ],
+    "commands": [
+      {
+        "command": "claudeBounce.test",
+        "title": "Claude Bounce: Test Bouncing This Window",
+        "category": "Claude Bounce"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Bounce",
+      "properties": {
+        "claudeBounce.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Bounce the VS Code Dock icon when Claude Code finishes in this window."
+        },
+        "claudeBounce.repeatCount": {
+          "type": "integer",
+          "default": 8,
+          "minimum": 1,
+          "markdownDescription": "VS Code uses `dock.bounce(\"informational\")`, which bounces exactly once. We therefore re-trigger it while the window has not regained focus. The Dock badge, by contrast, stays on its own until you come back."
+        },
+        "claudeBounce.repeatIntervalMs": {
+          "type": "integer",
+          "default": 3000,
+          "minimum": 500,
+          "description": "Delay between two bounces, in milliseconds."
+        },
+        "claudeBounce.helperBinary": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Claude Bounce helper binary, used to tell it we are taking over. Empty means the default location."
+        }
+      }
+    }
+  }
+}
