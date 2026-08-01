@@ -38,8 +38,14 @@ let configURL = supportDirectory().appendingPathComponent("config.json")
 let logURL = supportDirectory().appendingPathComponent("claude-bounce.log")
 let triggerURL = supportDirectory().appendingPathComponent("trigger.json")
 
+let logDateFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+}()
+
 func log(_ message: String) {
-    let stamp = ISO8601DateFormatter().string(from: Date())
+    let stamp = logDateFormatter.string(from: Date())
     guard let data = "[\(stamp)] \(message)\n".data(using: .utf8) else { return }
     if let handle = try? FileHandle(forWritingTo: logURL) {
         handle.seekToEndOfFile()
@@ -142,16 +148,9 @@ func runHookMode(kind: String) {
 
     let identifier = UUID().uuidString
 
-    // 1. The trigger file, watched by the VS Code extension (real editor icon bounce).
-    //    Written atomically; the extension watches the directory and reads on rename.
-    let payload: [String: String] = [
-        "id": identifier, "kind": kind, "cwd": cwd, "session": sessionID, "message": message,
-    ]
-    if let encoded = try? JSONSerialization.data(withJSONObject: payload) {
-        try? encoded.write(to: triggerURL, options: .atomic)
-    }
-
-    // 2. The helper app, as a safety net (terminals, no matching window, no extension).
+    // 1. The helper app, as a safety net (terminals, no matching window, no extension).
+    //    Notified first so it has registered the signal by the time the extension claims
+    //    it. The helper also tolerates a claim arriving early, so this is belt and braces.
     let userInfo: [String: String] = [
         "id": identifier,
         "kind": kind,
@@ -162,6 +161,15 @@ func runHookMode(kind: String) {
     ]
     DistributedNotificationCenter.default().postNotificationName(
         notifyNotification, object: nil, userInfo: userInfo, deliverImmediately: true)
+
+    // 2. The trigger file, watched by the VS Code extension (real editor icon bounce).
+    //    Written atomically; the extension watches the directory and reads on rename.
+    let payload: [String: String] = [
+        "id": identifier, "kind": kind, "cwd": cwd, "session": sessionID, "message": message,
+    ]
+    if let encoded = try? JSONSerialization.data(withJSONObject: payload) {
+        try? encoded.write(to: triggerURL, options: .atomic)
+    }
     exit(0)
 }
 
@@ -281,6 +289,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Signals waiting to see whether the VS Code extension claims them.
     private var graceWork: [String: DispatchWorkItem] = [:]
     private var gracePayload: [String: (PendingBounce, NSRunningApplication?)] = [:]
+    /// Claims that arrived before the matching signal did. The extension watches the trigger
+    /// file, so it can beat the distributed notification to us.
+    private var earlyClaims: [String: Date] = [:]
 
     // MARK: Lifecycle
 
@@ -325,12 +336,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let identifier = info["id"] ?? UUID().uuidString
+        scheduleOrFire(item, target: target, identifier: info["id"] ?? UUID().uuidString)
+    }
 
-        // The VS Code extension may bounce the real icon instead. Give it a moment to claim
-        // the signal before we put the helper's own icon in the Dock.
+    /// The VS Code extension may bounce the real icon instead. Give it a moment to claim the
+    /// signal before we put the helper's stand-in icon in the Dock.
+    private func scheduleOrFire(_ item: PendingBounce, target: NSRunningApplication?,
+                                identifier: String) {
         guard config.preferNativeBounce else {
             fire(item, target: target)
+            return
+        }
+
+        if earlyClaims.removeValue(forKey: identifier) != nil {
+            log("already claimed by VS Code: bouncing the real icon natively")
             return
         }
 
@@ -356,7 +375,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func handleClaim(_ note: Notification) {
         guard let info = note.userInfo as? [String: String],
               let identifier = info["id"] else { return }
-        guard let work = graceWork.removeValue(forKey: identifier) else { return }
+        guard let work = graceWork.removeValue(forKey: identifier) else {
+            // The claim beat the signal. Remember it so we skip the bounce when the signal
+            // shows up, and drop entries old enough that no signal is coming.
+            if info["release"] != "1" {
+                earlyClaims = earlyClaims.filter { Date().timeIntervalSince($0.value) < 30 }
+                earlyClaims[identifier] = Date()
+                log("claim arrived before its signal, noted")
+            }
+            return
+        }
         work.cancel()
         guard let payload = gracePayload.removeValue(forKey: identifier) else { return }
 
@@ -575,14 +603,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = AXIsProcessTrustedWithOptions(options)
     }
 
+    /// Goes through the whole pipeline, exactly like a real hook, so what you see is what
+    /// you get: VS Code bounces its own icon if a window claims the signal, and only
+    /// otherwise does the stand-in icon appear. The "*" working directory means "any
+    /// window may claim this one", since a test belongs to no particular project.
     @objc private func testBounce() {
+        let identifier = UUID().uuidString
+        let payload: [String: String] = [
+            "id": identifier, "kind": "test", "cwd": "*", "session": "", "message": "test",
+        ]
+        if let encoded = try? JSONSerialization.data(withJSONObject: payload) {
+            try? encoded.write(to: triggerURL, options: .atomic)
+        }
+
         let target = NSWorkspace.shared.runningApplications.first {
             $0.bundleIdentifier == fallbackTargetBundleID
         }
-        pending.append(PendingBounce(kind: "stop", cwd: FileManager.default.currentDirectoryPath,
-                                     message: "test", targetPID: target?.processIdentifier,
-                                     date: Date()))
-        startBouncing(target: target)
+        let item = PendingBounce(kind: "test", cwd: "", message: "test",
+                                 targetPID: target?.processIdentifier, date: Date())
+        scheduleOrFire(item, target: target, identifier: identifier)
     }
 
     @objc private func openLog() {

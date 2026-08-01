@@ -61,9 +61,11 @@ function tellHelper(id, release) {
   });
 }
 
-/// Does the signal's working directory belong to this window?
+/// Does the signal's working directory belong to this window? "*" means the signal belongs
+/// to no particular project — a test — so any window may claim it.
 function ownsPath(target) {
   if (!target) return false;
+  if (target === '*') return true;
   return (vscode.workspace.workspaceFolders || []).some((folder) => {
     const base = folder.uri.fsPath;
     return target === base || target.startsWith(base + path.sep);
