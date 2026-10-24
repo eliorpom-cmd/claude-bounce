@@ -4,10 +4,27 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 APP_NAME="Claude Bounce"
-VERSION="1.0.0"
+VERSION="1.0.1"
 DMG="dist/ClaudeBounce-$VERSION.dmg"
+# Developer ID signature and notarization, so the downloaded app opens without a warning.
+# Overrides: SIGN_IDENTITY, NOTARY_PROFILE (a `xcrun notarytool store-credentials` profile).
+export SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Bruno POMMIER (6388M5PCTC)}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-tbd-notary}"
+
+notarize() {
+  xcrun notarytool submit "$1" --keychain-profile "$NOTARY_PROFILE" --wait | tee dist/notarize.log
+  grep -q "status: Accepted" dist/notarize.log
+}
 
 ./build.sh
+
+echo "==> Notarizing the app"
+mkdir -p dist
+# notarytool takes no .app: zip it with ditto, which keeps the signature
+/usr/bin/ditto -c -k --keepParent "build/$APP_NAME.app" "dist/notarize.zip"
+notarize dist/notarize.zip
+rm -f dist/notarize.zip
+xcrun stapler staple "build/$APP_NAME.app"
 
 echo "==> Staging the disk image"
 rm -rf dist/stage "$DMG"
@@ -41,10 +58,8 @@ Claude Bounce
 1. Drag "Claude Bounce.app" onto the Applications folder.
 
 2. Run the setup, which registers the Claude Code hooks and installs the companion
-   VS Code extension. Either double-click "Setup.command", or -- if macOS refuses to
-   open it, since this build is not notarized -- paste this into Terminal:
+   VS Code extension. Either double-click "Setup.command", or paste this into Terminal:
 
-       xattr -dr com.apple.quarantine "/Applications/Claude Bounce.app"
        "/Applications/Claude Bounce.app/Contents/Resources/setup.sh"
 
 3. A chevron icon appears in your menu bar. Everything is configured from there.
@@ -69,4 +84,8 @@ hdiutil create \
   "$DMG" >/dev/null
 
 rm -rf dist/stage
+echo "==> Signing and notarizing the disk image"
+codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"
+notarize "$DMG"
+xcrun stapler staple "$DMG"
 echo "==> Built $DMG ($(du -h "$DMG" | cut -f1))"

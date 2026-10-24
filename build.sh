@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 APP_NAME="Claude Bounce"
 BUNDLE_ID="com.byelior.claudebounce"
-VERSION="1.0.0"
+VERSION="1.0.1"
 APP="build/$APP_NAME.app"
 
 rm -rf "$APP"
@@ -54,9 +54,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signing keeps the Accessibility grant stable across rebuilds; without it macOS
-# revokes the permission every time the binary changes.
-echo "==> Signing (ad-hoc)"
-codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
+# Ad-hoc signing keeps the Accessibility grant stable across local rebuilds; without it macOS
+# revokes the permission every time the binary changes. Releases pass SIGN_IDENTITY (a Developer
+# ID) with the hardened runtime and a timestamp, which notarization requires.
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+  echo "==> Signing ($SIGN_IDENTITY)"
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
+else
+  echo "==> Signing (ad-hoc)"
+  codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
+fi
 
 echo "==> Built $APP"

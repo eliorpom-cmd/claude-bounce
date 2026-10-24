@@ -13,19 +13,23 @@ frontmost, and not when the focused window is already the project that just fini
 
 ### From the disk image
 
-Download `ClaudeBounce-1.0.0.dmg` from the
+With [Homebrew](https://brew.sh):
+
+```bash
+brew install --cask eliorpom-cmd/tap/claude-bounce
+"/Applications/Claude Bounce.app/Contents/Resources/setup.sh"
+```
+
+Or download `ClaudeBounce-1.0.1.dmg` from the
 [latest release](https://github.com/eliorpom-cmd/claude-bounce/releases/latest), open it,
 and drag **Claude Bounce** onto Applications. Then run the setup, which registers the Claude
 Code hooks and installs the companion VS Code extension:
 
 ```bash
-xattr -dr com.apple.quarantine "/Applications/Claude Bounce.app"
 "/Applications/Claude Bounce.app/Contents/Resources/setup.sh"
 ```
 
-The `xattr` line is needed because this build is signed ad-hoc rather than notarized — see
-[Notes and caveats](#notes-and-caveats). The disk image also ships a double-clickable
-`Setup.command` that does the same thing, if macOS lets you open it.
+The disk image also ships a double-clickable `Setup.command` that does the same thing.
 
 ### From source
 
@@ -178,11 +182,10 @@ reverses all of it except the VS Code setting, which is stock VS Code and yours 
 - Hooks only apply to Claude Code sessions started **after** installation.
 - Already-open VS Code windows may need `Developer: Reload Window` before the extension
   starts bouncing the real icon.
-- The bundle is ad-hoc signed (`codesign --sign -`), not signed with a paid Developer ID and
-  not notarized. Ad-hoc signing is what keeps the Accessibility grant stable across rebuilds;
-  without it macOS revokes the permission every time the binary changes. The trade-off is
-  that a downloaded copy carries a quarantine flag Gatekeeper refuses to run, hence the
-  `xattr -dr com.apple.quarantine` step. Building from source avoids it entirely.
+- Releases are signed with a Developer ID and notarized by Apple (since 1.0.1), so they open
+  without a warning. A local `./build.sh` signs ad-hoc (`codesign --sign -`), which keeps the
+  Accessibility grant stable across rebuilds. Updating from 1.0.0 changes the signature:
+  macOS may ask for the Accessibility permission again.
 - Release binaries are universal (arm64 + x86_64), macOS 13 and later.
 - Running a task requires a trusted workspace. In an untrusted one the extension steps aside
   and the fallback helper bounces instead.
