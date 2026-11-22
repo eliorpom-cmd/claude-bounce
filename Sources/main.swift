@@ -71,8 +71,9 @@ struct Config: Codable {
     var windowLevelDetection = true
     /// Wear the target application's icon rather than a generic one.
     var useTargetIcon = true
-    /// Overlay a Claude badge so the bouncing icon is distinguishable from the real app.
-    var badgeIcon = true
+    /// Overlay a Claude badge on the stand-in icon. Off by default: the stand-in should look
+    /// exactly like the editor's own icon.
+    var badgeIcon = false
     /// Give the companion VS Code extension a chance to bounce the *real* editor icon
     /// before falling back to this helper's icon.
     var preferNativeBounce = true
@@ -134,6 +135,29 @@ func ancestorPIDs() -> [Int32] {
     return chain
 }
 
+/// True when one of the ancestors is a headless Claude run (`claude -p` / `--print`), such as
+/// a script or an agent driving Claude in the background. Nobody waits on those, so they
+/// must never bounce anything.
+func isHeadlessClaude(_ pids: [Int32]) -> Bool {
+    guard !pids.isEmpty else { return false }
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/ps")
+    process.arguments = ["-o", "args=", "-p", pids.map(String.init).joined(separator: ",")]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    do { try process.run() } catch { return false }
+    let output = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    for line in String(decoding: output, as: UTF8.self).split(separator: "\n") {
+        let tokens = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard let executable = tokens.first,
+              URL(fileURLWithPath: executable).lastPathComponent == "claude" else { continue }
+        if tokens.contains("-p") || tokens.contains("--print") { return true }
+    }
+    return false
+}
+
 func runHookMode(kind: String) {
     // Hooks receive their payload as JSON on stdin. This must never block Claude: on any
     // problem we simply exit 0 without doing anything.
@@ -148,6 +172,9 @@ func runHookMode(kind: String) {
         message = (object["message"] as? String) ?? ""
     }
 
+    let ancestors = ancestorPIDs()
+    if isHeadlessClaude(ancestors) { exit(0) }
+
     let identifier = UUID().uuidString
 
     // 1. The helper app, as a safety net (terminals, no matching window, no extension).
@@ -159,7 +186,7 @@ func runHookMode(kind: String) {
         "cwd": cwd,
         "session": sessionID,
         "message": message,
-        "pids": ancestorPIDs().map(String.init).joined(separator: ","),
+        "pids": ancestors.map(String.init).joined(separator: ","),
     ]
     DistributedNotificationCenter.default().postNotificationName(
         notifyNotification, object: nil, userInfo: userInfo, deliverImmediately: true)
