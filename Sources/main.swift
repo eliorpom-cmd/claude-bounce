@@ -76,8 +76,10 @@ struct Config: Codable {
     /// Give the companion VS Code extension a chance to bounce the *real* editor icon
     /// before falling back to this helper's icon.
     var preferNativeBounce = true
-    /// How long to wait for the extension to claim a signal, in milliseconds.
-    var claimGraceMs = 700
+    /// How long to wait for the extension to claim a signal, in milliseconds. VS Code's
+    /// extension host is throttled while the editor is in the background, so its claim can
+    /// take close to a second; a late claim still removes the stand-in icon (see handleClaim).
+    var claimGraceMs = 1500
 
     static func load() -> Config {
         guard let data = try? Data(contentsOf: configURL),
@@ -269,6 +271,7 @@ func dockIcon(for application: NSRunningApplication?, config: Config) -> NSImage
 // MARK: - Agent
 
 struct PendingBounce {
+    var id = ""
     let kind: String
     let cwd: String
     let message: String
@@ -292,6 +295,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Claims that arrived before the matching signal did. The extension watches the trigger
     /// file, so it can beat the distributed notification to us.
     private var earlyClaims: [String: Date] = [:]
+    /// Signals the helper already bounced for after the grace period ran out. If VS Code's
+    /// claim shows up late, the stand-in icon is withdrawn so only the real icon bounces.
+    private var firedIDs: [String: Date] = [:]
 
     // MARK: Lifecycle
 
@@ -328,7 +334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard wants(kind: kind) else { log("\(kind) ignored (event turned off)"); return }
 
         let target = resolveTargetApplication(from: pids)
-        let item = PendingBounce(kind: kind, cwd: cwd, message: info["message"] ?? "",
+        let item = PendingBounce(id: info["id"] ?? "", kind: kind, cwd: cwd, message: info["message"] ?? "",
                                  targetPID: target?.processIdentifier, date: Date())
 
         guard shouldBounce(target: target, cwd: cwd) else {
@@ -366,6 +372,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func fire(_ item: PendingBounce, target: NSRunningApplication?) {
+        if !item.id.isEmpty {
+            firedIDs = firedIDs.filter { Date().timeIntervalSince($0.value) < 60 }
+            firedIDs[item.id] = Date()
+        }
         pending.append(item)
         startBouncing(target: target)
         log("helper bounce: \(item.kind) [\(item.projectName)] target=\(target?.localizedName ?? "?")")
@@ -376,6 +386,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let info = note.userInfo as? [String: String],
               let identifier = info["id"] else { return }
         guard let work = graceWork.removeValue(forKey: identifier) else {
+            // The claim came after the grace period: the helper is already bouncing a
+            // stand-in icon while VS Code bounces the real one. Withdraw the stand-in.
+            if info["release"] != "1", firedIDs.removeValue(forKey: identifier) != nil {
+                pending.removeAll { $0.id == identifier }
+                log("late claim by VS Code: withdrawing the helper icon")
+                if pending.isEmpty {
+                    stopBouncing()
+                } else {
+                    NSApp.dockTile.badgeLabel = pending.count > 1 ? "\(pending.count)" : nil
+                    NSApp.dockTile.display()
+                }
+                return
+            }
             // The claim beat the signal. Remember it so we skip the bounce when the signal
             // shows up, and drop entries old enough that no signal is coming.
             if info["release"] != "1" {

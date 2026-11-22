@@ -24,6 +24,10 @@ const { execFile } = require('child_process');
 
 const SUPPORT_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'ClaudeBounce');
 const TRIGGER_FILE = path.join(SUPPORT_DIR, 'trigger.json');
+const CLAIMS_DIR = path.join(SUPPORT_DIR, 'claims');
+// A window whose workspace does not contain the session's folder waits this long, then
+// claims the signal anyway: VS Code has a single Dock icon, any window can bounce it.
+const ORPHAN_DELAY_MS = 400;
 const LOG_FILE = path.join(SUPPORT_DIR, 'claude-bounce.log');
 const DEFAULT_HELPER = path.join(
   os.homedir(), 'Applications', 'Claude Bounce.app', 'Contents', 'MacOS', 'ClaudeBounce');
@@ -34,6 +38,8 @@ const TASK_NAME = 'bounce';
 let lastHandledId = '';
 let repeatTimer = null;
 let watcher = null;
+let bounceTerminals = new Set();
+let cleanupTimer = null;
 
 function log(message) {
   const tag = (vscode.workspace.workspaceFolders || []).map((f) => f.name).join('+') || 'no-folder';
@@ -59,6 +65,28 @@ function tellHelper(id, release) {
     if (release) args.push('--release');
     execFile(helperBinary(), args, { timeout: 2000 }, () => resolve());
   });
+}
+
+/// Several windows may see the same signal. The first one to create the claim file wins,
+/// so exactly one window bounces and the helper never needs its stand-in icon.
+function takeClaim(id) {
+  try {
+    fs.mkdirSync(CLAIMS_DIR, { recursive: true });
+    fs.closeSync(fs.openSync(path.join(CLAIMS_DIR, id), 'wx'));
+  } catch {
+    return false;
+  }
+  // Drop claim files older than a minute.
+  try {
+    const now = Date.now();
+    for (const name of fs.readdirSync(CLAIMS_DIR)) {
+      const file = path.join(CLAIMS_DIR, name);
+      if (now - fs.statSync(file).mtimeMs > 60000) fs.unlinkSync(file);
+    }
+  } catch {
+    // Housekeeping only.
+  }
+  return true;
 }
 
 /// Does the signal's working directory belong to this window? "*" means the signal belongs
@@ -102,17 +130,52 @@ function makeTask() {
 
 /// We go through the *command* rather than vscode.tasks.executeTask(): the latter tags the
 /// run with source 5 (API), which VS Code explicitly excludes from completion notifications.
+///
+/// When VS Code cannot find the task in its list (provider not collected yet, window with
+/// no folder), runTask falls back to the "Select the task to run" quick pick, filtered on
+/// "bounce", and leaves it open at the top of the window. So check first that the task is
+/// listed, and close the quick pick if it shows up anyway while nobody is looking.
 async function runBounceTask() {
+  const listed = await vscode.tasks.fetchTasks({ type: TASK_TYPE });
+  if (!listed.some((task) => task.name === TASK_NAME)) {
+    throw new Error('task not listed by VS Code yet');
+  }
+  const before = new Set(vscode.window.terminals);
   await vscode.commands.executeCommand('workbench.action.tasks.runTask', {
     type: TASK_TYPE,
     task: TASK_NAME,
   });
+  setTimeout(() => {
+    for (const terminal of vscode.window.terminals) {
+      if (!before.has(terminal)) bounceTerminals.add(terminal);
+    }
+    if (!vscode.window.state.focused) {
+      vscode.commands.executeCommand('workbench.action.closeQuickOpen').then(undefined, () => {});
+    }
+  }, 300);
+}
+
+/// The task needs its terminal alive until the completion is handled, but once the bounce
+/// cycle is over it would sit in the panel and become the terminal VS Code shows by
+/// default. Dispose it, a few seconds after the last run.
+function scheduleTerminalCleanup() {
+  clearTimeout(cleanupTimer);
+  cleanupTimer = setTimeout(() => {
+    for (const terminal of vscode.window.terminals) {
+      if (bounceTerminals.has(terminal) || terminal.name === TASK_NAME
+          || terminal.name.endsWith(' - ' + TASK_NAME)) {
+        terminal.dispose();
+      }
+    }
+    bounceTerminals = new Set();
+  }, 3000);
 }
 
 function stopRepeating() {
   if (repeatTimer) {
     clearInterval(repeatTimer);
     repeatTimer = null;
+    scheduleTerminalCleanup();
   }
 }
 
@@ -134,15 +197,21 @@ async function startBouncing(reason) {
     count += 1;
     try {
       await runBounceTask();
+      return true;
     } catch (error) {
+      // After the first run, not fatal: the next tick tries again.
       log(`could not run the task: ${error && error.message}`);
-      stopRepeating();
+      return false;
     }
   };
 
   log(`native bounce (${reason})`);
-  await tick();
   repeatTimer = setInterval(tick, interval);
+  if (!(await tick())) {
+    // Nothing bounced at all: let the caller hand the signal back to the helper.
+    stopRepeating();
+    throw new Error('first bounce failed');
+  }
 }
 
 // MARK: - Signal handling
@@ -155,8 +224,12 @@ async function onTrigger() {
     return;
   }
   if (!payload.id || payload.id === lastHandledId) return;
-  if (!ownsPath(payload.cwd)) return;
   lastHandledId = payload.id;
+  if (!vscode.workspace.workspaceFolders) return;
+  // The window that holds the project answers at once; the others give it a head start.
+  if (!ownsPath(payload.cwd)) {
+    await new Promise((resolve) => setTimeout(resolve, ORPHAN_DELAY_MS));
+  }
 
   if (!config().get('enabled', true)) {
     log('signal ignored (disabled for this window)');
@@ -169,7 +242,8 @@ async function onTrigger() {
     return;
   }
 
-  // Reserve the signal so the helper app does not bounce a second icon.
+  // Only one window bounces, then the helper is told not to bounce a second icon.
+  if (!takeClaim(payload.id)) return;
   await tellHelper(payload.id, false);
 
   if (vscode.window.state.focused) {
