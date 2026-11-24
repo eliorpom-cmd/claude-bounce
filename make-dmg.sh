@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 APP_NAME="Claude Bounce"
-VERSION="1.0.1"
+VERSION="1.0.2"
 DMG="dist/ClaudeBounce-$VERSION.dmg"
 # Developer ID signature and notarization, so the downloaded app opens without a warning.
 # Overrides: SIGN_IDENTITY, NOTARY_PROFILE (a `xcrun notarytool store-credentials` profile).

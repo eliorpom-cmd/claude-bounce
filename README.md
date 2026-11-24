@@ -20,7 +20,7 @@ brew install --cask eliorpom-cmd/tap/claude-bounce
 "/Applications/Claude Bounce.app/Contents/Resources/setup.sh"
 ```
 
-Or download `ClaudeBounce-1.0.1.dmg` from the
+Or download `ClaudeBounce-1.0.2.dmg` from the
 [latest release](https://github.com/eliorpom-cmd/claude-bounce/releases/latest), open it,
 and drag **Claude Bounce** onto Applications. Then run the setup, which registers the Claude
 Code hooks and installs the companion VS Code extension:

@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 APP_NAME="Claude Bounce"
 BUNDLE_ID="com.byelior.claudebounce"
-VERSION="1.0.1"
+VERSION="1.0.2"
 APP="build/$APP_NAME.app"
 
 rm -rf "$APP"
