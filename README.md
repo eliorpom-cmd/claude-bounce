@@ -1,10 +1,11 @@
 # Claude Bounce
 
-Bounce your editor's Dock icon when Claude Code finishes a turn or asks for permission, so
-you can go do something else while it works instead of checking back every thirty seconds.
+Bounce your editor's Dock icon when Claude Code or OpenAI's Codex finishes a turn (or Claude
+Code asks for permission), so you can go do something else while it works instead of
+checking back every thirty seconds.
 
-macOS only. Works with the Claude Code VS Code extension and with Claude Code in any
-terminal.
+macOS only. Works with Claude Code and Codex, in their VS Code extensions and in any
+terminal. See [Codex](#codex) for what differs there.
 
 It bounces **only** when you are not already looking at the session: not when the editor is
 frontmost, and not when the focused window is already the project that just finished.
@@ -23,7 +24,7 @@ brew install --cask eliorpom-cmd/tap/claude-bounce
 Or download `ClaudeBounce-1.0.2.dmg` from the
 [latest release](https://github.com/eliorpom-cmd/claude-bounce/releases/latest), open it,
 and drag **Claude Bounce** onto Applications. Then run the setup, which registers the Claude
-Code hooks and installs the companion VS Code extension:
+Code hooks and the Codex notify program, and installs the companion VS Code extension:
 
 ```bash
 "/Applications/Claude Bounce.app/Contents/Resources/setup.sh"
@@ -44,12 +45,44 @@ cd claude-bounce
 ### Either way, two last steps
 
 1. Reload any open VS Code window (`Developer: Reload Window`) so it picks up the extension.
-2. Start a new Claude Code session — hooks only apply to sessions started after setup.
+2. Start a new Claude Code or Codex session — hooks only apply to sessions started after
+   setup.
 
 Then check it works: click the menu bar chevron → **Test bounce**.
 
 To remove everything: `./uninstall.sh` from the repo, or
 `"/Applications/Claude Bounce.app/Contents/Resources/uninstall.sh"` for a disk image install.
+
+## Codex
+
+Setup also wires up [Codex](https://github.com/openai/codex), in the terminal and in the
+Codex extension for VS Code, when `~/.codex` exists (otherwise it skips this silently). It
+adds one line at the top level of `~/.codex/config.toml`, after a timestamped backup:
+
+```toml
+notify = ["/Applications/Claude Bounce.app/Contents/MacOS/ClaudeBounce", "hook", "--kind", "stop", "--source", "codex"]
+```
+
+Codex runs that program when a turn finishes, with the event as a JSON argument; Claude
+Bounce takes the project folder (`cwd`) and the session (`thread-id`) from it and then
+behaves exactly as with Claude Code: same app detection, same native VS Code bounce, same
+fallback helper. Running setup again keeps a single line.
+
+What works, and what doesn't:
+
+- **Turn finished**: bounces, governed by **Bounce when the agent finishes** in the menu.
+- **Approval requests**: no bounce. Codex's `notify` program only receives
+  `agent-turn-complete` events, so Codex bounces only when a turn ends.
+- **`codex exec`** (non-interactive runs, scripts): never bounces, like `claude -p`.
+
+**If you already have a `notify` program**, Codex only takes one, so setup leaves yours
+untouched and prints "Codex already has a notify program. Claude Bounce did not replace it:
+see README, Codex." To use Claude Bounce instead, replace your `notify` line with the one
+above and run setup again. To keep both, point `notify` at a small script of your own that
+calls each program with the JSON argument it received.
+
+**To turn it off**, delete the `notify = [...ClaudeBounce...]` line from
+`~/.codex/config.toml`, or run `uninstall.sh`, which removes that line and only that line.
 
 ---
 
@@ -112,9 +145,10 @@ focus, which reads as a continuous bounce.
 ## Architecture
 
 ```
-Claude Code hook (Stop / Notification)
-  └─ ClaudeBounce hook --kind stop          ← same binary, CLI mode
-       reads the hook JSON on stdin (cwd, session_id, message)
+Claude Code hook (Stop / Notification)        Codex notify (turn finished)
+  └─ ClaudeBounce hook --kind stop              └─ ClaudeBounce hook --kind stop --source codex
+       reads the hook JSON on stdin (cwd, session_id, message)  — or, from Codex, the JSON
+       in its last argument (cwd, thread-id)
        walks up the process tree to find the host GUI app
        writes trigger.json  ─────────────┐  and posts a distributed notification ─┐
        exits immediately, never blocks   │                                        │
@@ -128,7 +162,8 @@ Claude Code hook (Stop / Notification)
 **Finding the right app.** Rather than hardcoding VS Code, the hook walks `pid → ppid` until
 it hits a process that is a GUI application. From the VS Code extension the chain is
 `hook → claude → Code Helper (Plugin) → Code`. Run Claude Code in Terminal or iTerm and that
-app bounces instead.
+app bounces instead. Codex works the same way: its VS Code extension runs `codex` under the
+editor, so the walk finds VS Code, and in a terminal it finds the terminal.
 
 **The fallback helper.** When no VS Code window claims a signal — Claude running in a
 terminal, an untrusted workspace, the extension not installed — a small agent bounces *its
@@ -148,7 +183,7 @@ Menu bar icon:
 | Setting | Default |
 |---|---|
 | Enabled | on |
-| Bounce when Claude finishes (`Stop`) | on |
+| Bounce when the agent finishes (Claude Code `Stop`, Codex `notify`) | on |
 | Bounce when Claude needs permission (`Notification`) | on |
 | Bounce when a subagent finishes (`SubagentStop`) | off — hook not installed |
 | Prefer VS Code's own icon | on |
@@ -171,6 +206,8 @@ path never needs it.
 - `~/Applications/Claude Bounce.app`
 - `~/Library/LaunchAgents/com.byelior.claudebounce.plist`
 - `~/.claude/settings.json` → `Stop` and `Notification` hooks
+- `~/.codex/config.toml` → a top-level `notify` line, when Codex is installed and has no
+  other `notify` program
 - `~/.vscode/extensions/byelior.claude-bounce-bridge-1.0.0/`
 - `task.notifyWindowOnTaskCompletion: 0` in your VS Code user settings
 
@@ -179,7 +216,7 @@ reverses all of it except the VS Code setting, which is stock VS Code and yours 
 
 ## Notes and caveats
 
-- Hooks only apply to Claude Code sessions started **after** installation.
+- Hooks only apply to Claude Code (and Codex) sessions started **after** installation.
 - Already-open VS Code windows may need `Developer: Reload Window` before the extension
   starts bouncing the real icon.
 - Releases are signed with a Developer ID and notarized by Apple (since 1.0.1), so they open
