@@ -1,6 +1,6 @@
 #!/bin/bash
 # Wires an installed Claude Bounce.app into the system: launch agent, Claude Code hooks,
-# and the companion VS Code extension.
+# Codex's notify program, and the companion VS Code extension.
 #
 # Usage: setup.sh [/path/to/Claude Bounce.app]
 #
@@ -92,6 +92,60 @@ with open(path, "w") as f:
 print("    Stop and Notification hooks registered")
 PY
 
+# Codex (terminal and VS Code extension): its `notify` program runs once per finished turn,
+# with the event as a JSON argument. Skipped silently when Codex is not installed.
+register_codex_notify() {
+  local codex_config="$HOME/.codex/config.toml"
+  [ -d "$HOME/.codex" ] || return 0
+
+  echo "==> Registering the Codex notify program in $codex_config"
+  [ -f "$codex_config" ] || : > "$codex_config"
+  cp "$codex_config" "$codex_config.bak.$(date +%Y%m%d%H%M%S)"
+
+  BIN="$BIN" python3 - "$codex_config" <<'PY'
+import json, os, re, sys
+
+# No TOML library in the standard library before 3.11, and none that writes: edit the file
+# line by line instead. Only top-level keys matter here, i.e. the lines before the first
+# [table] header.
+path = sys.argv[1]
+binary = os.environ["BIN"]
+line = "notify = " + json.dumps([binary, "hook", "--kind", "stop", "--source", "codex"]) + "\n"
+
+with open(path) as f:
+    lines = f.readlines()
+
+header = re.compile(r"^\s*\[\[?\s*[A-Za-z0-9_.\"' -]+\]\]?\s*(#.*)?$")
+notify = re.compile(r"^\s*notify\s*=")
+end = next((i for i, text in enumerate(lines) if header.match(text)), len(lines))
+existing = [i for i in range(end) if notify.match(lines[i])]
+
+if any("ClaudeBounce" not in lines[i] for i in existing):
+    print("Codex already has a notify program. Claude Bounce did not replace it: see README, Codex.")
+    sys.exit(0)
+
+# Idempotent: drop the Claude Bounce line if it is already there, then add it back.
+for i in reversed(existing):
+    del lines[i]
+    end -= 1
+
+# Right after the last top-level line, so a blank line before the first table stays put.
+at = end
+while at > 0 and not lines[at - 1].strip():
+    at -= 1
+if at > 0 and not lines[at - 1].endswith("\n"):
+    lines[at - 1] += "\n"
+lines.insert(at, line)
+if at == end and end < len(lines) - 1:
+    lines.insert(at + 1, "\n")
+
+with open(path, "w") as f:
+    f.writelines(lines)
+print("    Codex notify program registered")
+PY
+}
+register_codex_notify
+
 install_for_editor() {
   local ext_root="$1" settings_file="$2" label="$3"
   [ -d "$ext_root" ] || return 0
@@ -152,6 +206,7 @@ Done.
     System Settings -> Privacy & Security -> Accessibility.
   * Reload your open VS Code windows ("Developer: Reload Window") so they pick up the
     extension and start bouncing the real editor icon.
-  * Hooks only apply to Claude Code sessions started after this setup.
+  * Hooks only apply to Claude Code sessions started after this setup, and the notify
+    program to Codex sessions started after it.
 
 EOS

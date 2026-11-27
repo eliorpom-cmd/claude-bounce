@@ -1,5 +1,6 @@
 #!/bin/bash
-# Removes Claude Bounce: launch agent, helper app, Claude Code hooks, VS Code extension.
+# Removes Claude Bounce: launch agent, helper app, Claude Code hooks, Codex notify program,
+# VS Code extension.
 # Leaves your config and log behind in ~/Library/Application Support/ClaudeBounce.
 set -euo pipefail
 
@@ -51,6 +52,32 @@ if not hooks:
 with open(path, "w") as f:
     json.dump(settings, f, indent=2)
     f.write("\n")
+PY
+fi
+
+CODEX_CONFIG="$HOME/.codex/config.toml"
+if [ -f "$CODEX_CONFIG" ] && grep -q "ClaudeBounce" "$CODEX_CONFIG"; then
+  echo "==> Removing the Codex notify program"
+  cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak.$(date +%Y%m%d%H%M%S)"
+  python3 - "$CODEX_CONFIG" <<'PY'
+import re, sys
+
+# Only the top-level `notify = [... ClaudeBounce ...]` line written by setup.sh; every other
+# line, including another program's notify, stays as it is.
+path = sys.argv[1]
+with open(path) as f:
+    lines = f.readlines()
+
+header = re.compile(r"^\s*\[\[?\s*[A-Za-z0-9_.\"' -]+\]\]?\s*(#.*)?$")
+notify = re.compile(r"^\s*notify\s*=")
+end = next((i for i, text in enumerate(lines) if header.match(text)), len(lines))
+lines = [
+    text for i, text in enumerate(lines)
+    if not (i < end and notify.match(text) and "ClaudeBounce" in text)
+]
+
+with open(path, "w") as f:
+    f.writelines(lines)
 PY
 fi
 

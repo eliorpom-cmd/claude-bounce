@@ -3,7 +3,9 @@
 // One binary, three modes:
 //   • no arguments           → the resident agent (menu bar item, listens, bounces)
 //   • `hook --kind <event>`  → invoked by a Claude Code hook: reads the hook's JSON
-//                              payload on stdin, signals the agent, exits immediately
+//                              payload on stdin, signals the agent, exits immediately.
+//                              With `--source codex`, invoked by Codex's `notify` program
+//                              instead: the JSON payload is the last argument.
 //   • `claim --id <uuid>`    → invoked by the companion VS Code extension to say
 //                              "I'll handle this one natively, stand down"
 //
@@ -60,7 +62,7 @@ func log(_ message: String) {
 
 struct Config: Codable {
     var enabled = true
-    /// Bounce when Claude finishes a turn (the `Stop` hook).
+    /// Bounce when the agent finishes a turn (Claude Code's `Stop` hook, Codex's `notify`).
     var onStop = true
     /// Bounce when Claude asks for permission or waits for input (the `Notification` hook).
     var onNotification = true
@@ -135,9 +137,9 @@ func ancestorPIDs() -> [Int32] {
     return chain
 }
 
-/// True when one of the ancestors is a headless Claude run (`claude -p` / `--print`), such as
-/// a script or an agent driving Claude in the background. Nobody waits on those, so they
-/// must never bounce anything.
+/// True when one of the ancestors is a headless Claude run (`claude -p` / `--print`) or a
+/// non-interactive Codex run (`codex exec`), such as a script or an agent driving it in the
+/// background. Nobody waits on those, so they must never bounce anything.
 func isHeadlessClaude(_ pids: [Int32]) -> Bool {
     guard !pids.isEmpty else { return false }
     let process = Process()
@@ -151,25 +153,61 @@ func isHeadlessClaude(_ pids: [Int32]) -> Bool {
     process.waitUntilExit()
     for line in String(decoding: output, as: UTF8.self).split(separator: "\n") {
         let tokens = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-        guard let executable = tokens.first,
-              URL(fileURLWithPath: executable).lastPathComponent == "claude" else { continue }
-        if tokens.contains("-p") || tokens.contains("--print") { return true }
+        guard let executable = tokens.first else { continue }
+        if URL(fileURLWithPath: executable).lastPathComponent == "claude" {
+            if tokens.contains("-p") || tokens.contains("--print") { return true }
+        }
+        if isCodexExec(tokens) { return true }
     }
     return false
 }
 
-func runHookMode(kind: String) {
-    // Hooks receive their payload as JSON on stdin. This must never block Claude: on any
-    // problem we simply exit 0 without doing anything.
-    let data = FileHandle.standardInput.readDataToEndOfFile()
+/// `codex exec …` (alias `codex e`), either the native binary or the npm wrapper run through
+/// node (`node …/bin/codex exec …`). Only the subcommand position counts, so an interactive
+/// session whose prompt happens to contain the word "exec" still bounces.
+func isCodexExec(_ tokens: [String]) -> Bool {
+    let isCodex: (String) -> Bool = { token in
+        let name = URL(fileURLWithPath: token).lastPathComponent
+        return name == "codex" || name.hasPrefix("codex-")
+    }
+    let index: Int
+    if let first = tokens.first, isCodex(first) {
+        index = 0
+    } else if tokens.count > 1, isCodex(tokens[1]),
+              URL(fileURLWithPath: tokens[0]).lastPathComponent.hasPrefix("node") {
+        index = 1
+    } else {
+        return false
+    }
+    guard let subcommand = tokens[(index + 1)...].first(where: { !$0.hasPrefix("-") })
+    else { return false }
+    return subcommand == "exec" || subcommand == "e"
+}
+
+func runHookMode(kind: String, source: String, arguments: [String]) {
+    // Claude Code hooks receive their payload as JSON on stdin; Codex's `notify` program gets
+    // it as its last command-line argument. This must never block the agent: on any problem
+    // we simply exit 0 without doing anything.
     var cwd = ProcessInfo.processInfo.environment["PWD"] ?? FileManager.default.currentDirectoryPath
     var sessionID = ""
     var message = ""
 
-    if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-        cwd = (object["cwd"] as? String) ?? cwd
-        sessionID = (object["session_id"] as? String) ?? ""
-        message = (object["message"] as? String) ?? ""
+    if source == "codex" {
+        // Codex: {"type": "agent-turn-complete", "thread-id": …, "cwd": …, …}. Its messages
+        // are the conversation itself, not a status line, so `message` stays empty.
+        let data = Data((arguments.last ?? "").utf8)
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let type = object["type"] as? String, type != "agent-turn-complete" { exit(0) }
+            cwd = (object["cwd"] as? String) ?? cwd
+            sessionID = (object["thread-id"] as? String) ?? ""
+        }
+    } else {
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            cwd = (object["cwd"] as? String) ?? cwd
+            sessionID = (object["session_id"] as? String) ?? ""
+            message = (object["message"] as? String) ?? ""
+        }
     }
 
     let ancestors = ancestorPIDs()
@@ -586,7 +624,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(toggle("Enabled", #selector(toggleEnabled), config.enabled))
         menu.addItem(.separator())
 
-        menu.addItem(toggle("Bounce when Claude finishes", #selector(toggleOnStop), config.onStop))
+        menu.addItem(toggle("Bounce when the agent finishes", #selector(toggleOnStop), config.onStop))
         menu.addItem(toggle("Bounce when Claude needs permission",
                             #selector(toggleOnNotification), config.onNotification))
         menu.addItem(toggle("Bounce when a subagent finishes",
@@ -740,7 +778,11 @@ if arguments.first == "hook" {
     if let index = arguments.firstIndex(of: "--kind"), index + 1 < arguments.count {
         kind = arguments[index + 1]
     }
-    runHookMode(kind: kind)
+    var source = "claude"
+    if let index = arguments.firstIndex(of: "--source"), index + 1 < arguments.count {
+        source = arguments[index + 1]
+    }
+    runHookMode(kind: kind, source: source, arguments: arguments)
 }
 
 if arguments.first == "claim" {
